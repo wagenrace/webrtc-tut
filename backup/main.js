@@ -7,6 +7,7 @@
   var messageInputBox = null;
   var receiveBox = null;
 
+  var localConnection = null; // RTCPeerConnection for our "local" connection
   var remoteConnection = null; // RTCPeerConnection for the "remote"
 
   var sendChannel = null; // RTCDataChannel for the local (sender)
@@ -21,7 +22,6 @@
     disconnectButton = document.getElementById("disconnectButton");
     sendButton = document.getElementById("sendButton");
     messageInputBox = document.getElementById("message");
-    hostTokenInputBox = document.getElementById("hostToken");
     receiveBox = document.getElementById("receivebox");
 
     // Set event listeners for user interface widgets
@@ -36,24 +36,48 @@
   // bypass that step.
 
   function connectPeers() {
+    // Create the local connection and its event listeners
+
+    localConnection = new RTCPeerConnection();
+
+    // Create the data channel and establish its event listeners
+    sendChannel = localConnection.createDataChannel("sendChannel");
+    sendChannel.onopen = handleSendChannelStatusChange;
+    sendChannel.onclose = handleSendChannelStatusChange;
+
     // Create the remote connection and its event listeners
 
     remoteConnection = new RTCPeerConnection();
     remoteConnection.ondatachannel = receiveChannelCallback;
 
-    // Get host token
-    var hostToken = hostTokenInputBox.value;
-    if (!hostToken) {
-      console.error("Host token is required to connect.");
-      return;
-    }
+    // Set up the ICE candidates for the two peers
+
+    localConnection.onicecandidate = (e) =>
+      !e.candidate ||
+      remoteConnection
+        .addIceCandidate(e.candidate)
+        .catch(handleAddCandidateError);
+
+    remoteConnection.onicecandidate = (e) =>
+      !e.candidate ||
+      localConnection
+        .addIceCandidate(e.candidate)
+        .catch(handleAddCandidateError);
 
     // Now create an offer to connect; this starts the process
-    remoteConnection
-      .setRemoteDescription({ sdp: hostToken, type: "offer" })
+
+    localConnection
+      .createOffer()
+      .then((offer) => localConnection.setLocalDescription(offer))
+      .then(() => {
+        console.log(localConnection.localDescription);
+        remoteConnection.setRemoteDescription(localConnection.localDescription);
+      })
       .then(() => remoteConnection.createAnswer())
       .then((answer) => remoteConnection.setLocalDescription(answer))
-      .then(connectionMade())
+      .then(() =>
+        localConnection.setRemoteDescription(remoteConnection.localDescription)
+      )
       .catch(handleCreateDescriptionError);
   }
 
@@ -66,16 +90,24 @@
     console.log("Unable to create an offer: " + error.toString());
   }
 
+  // Handle successful addition of the ICE candidate
+  // on the "local" end of the connection.
+
+  function handleLocalAddCandidateSuccess() {
+    connectButton.disabled = true;
+  }
+
+  // Handle successful addition of the ICE candidate
+  // on the "remote" end of the connection.
+
+  function handleRemoteAddCandidateSuccess() {
+    disconnectButton.disabled = false;
+  }
+
   // Handle an error that occurs during addition of ICE candidate.
 
-  function connectionMade() {
-    sendChannel = remoteConnection.receiveChannel()
-    console.log("Connection established successfully!");
-    connectButton.disabled = true;
-    disconnectButton.disabled = false;
-    sendButton.disabled = false;
-    messageInputBox.disabled = false;
-    messageInputBox.focus();
+  function handleAddCandidateError() {
+    console.log("Oh noes! addICECandidate failed!");
   }
 
   // Handles clicks on the "Send" button by transmitting
@@ -90,6 +122,29 @@
 
     messageInputBox.value = "";
     messageInputBox.focus();
+  }
+
+  // Handle status changes on the local end of the data
+  // channel; this is the end doing the sending of data
+  // in this example.
+
+  function handleSendChannelStatusChange(event) {
+    if (sendChannel) {
+      var state = sendChannel.readyState;
+
+      if (state === "open") {
+        messageInputBox.disabled = false;
+        messageInputBox.focus();
+        sendButton.disabled = false;
+        disconnectButton.disabled = false;
+        connectButton.disabled = true;
+      } else {
+        messageInputBox.disabled = true;
+        sendButton.disabled = true;
+        connectButton.disabled = false;
+        disconnectButton.disabled = true;
+      }
+    }
   }
 
   // Called when the connection opens and the data
@@ -137,10 +192,12 @@
 
     // Close the RTCPeerConnections
 
+    localConnection.close();
     remoteConnection.close();
 
     sendChannel = null;
     receiveChannel = null;
+    localConnection = null;
     remoteConnection = null;
 
     // Update user interface elements
